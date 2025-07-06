@@ -1,0 +1,6 @@
+words = [
+    "icmphdr",
+    "sockaddr",
+    "sockfd",
+    "timeval",
+]
