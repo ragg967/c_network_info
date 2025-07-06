@@ -1,0 +1,45 @@
+  # Build artifacts
+  build/
+  bin/
+  obj/
+
+  # Object files and executables
+  *.o
+  *.out
+  *.exe
+  *.so
+  *.a
+
+  # Debug files
+  *.dSYM/
+  *.su
+  *.d
+  core
+  core.*
+  gmon.out
+
+  # Coverage and profiling
+  *.gcno
+  *.gcda
+  *.gcov
+
+  # Valgrind files
+  *.valgrind
+  vgcore.*
+
+  # Editor files
+  *.swp
+  *~
+
+  # Linux specific
+  .fuse_hidden*
+  .directory
+  .Trash-*
+
+  # Logs and temporary files
+  *.log
+  *.tmp
+
+  # Personal notes
+  TODO.md
+  NOTES.md
