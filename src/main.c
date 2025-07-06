@@ -32,8 +32,8 @@ typedef struct {
 } thread_pool_t;
 
 // Enhanced task structure with better alignment
-typedef struct alignas(64) {
-  char ip[IP_STR_LEN];
+typedef struct {
+  alignas(64) char ip[IP_STR_LEN];
   _Atomic int alive;
   _Atomic int processed;
 } ping_task_t;
@@ -57,15 +57,28 @@ static _Atomic int active_ping_threads = 0;
 static thread_pool_t ping_pool = {0};
 static thread_pool_t subnet_pool = {0};
 
+// Function prototypes
+static int get_optimal_thread_count(void);
+static int init_thread_pool(thread_pool_t *pool, int max_threads);
+static void cleanup_thread_pool(thread_pool_t *pool);
+static void *ping_worker(void *arg);
+static void *subnet_worker(void *arg);
+static void scan_subnets_parallel(const char *const *subnets, int count,
+                                  const char *description);
+static void scan_all_common_private_networks_parallel(void);
+static void scan_full_class_c_range_parallel(void);
+static void scan_single_subnet_parallel(const char *base, int start_host,
+                                        int end_host);
+
 // Get optimal thread count based on system
-static auto get_optimal_thread_count() -> int {
+static int get_optimal_thread_count(void) {
   int cores = get_nprocs();
   // Use more threads than cores for I/O bound operations like ping
   return cores > 0 ? cores * 4 : 64;
 }
 
 // Initialize thread pool
-static auto init_thread_pool(thread_pool_t *pool, int max_threads) -> int {
+static int init_thread_pool(thread_pool_t *pool, int max_threads) {
   pool->threads = malloc(max_threads * sizeof(pthread_t));
   if (!pool->threads)
     return -1;
@@ -73,12 +86,12 @@ static auto init_thread_pool(thread_pool_t *pool, int max_threads) -> int {
   pool->thread_count = max_threads;
   pool->active_threads = 0;
 
-  if (pthread_mutex_init(&pool->mutex, nullptr) != 0) {
+  if (pthread_mutex_init(&pool->mutex, NULL) != 0) {
     free(pool->threads);
     return -1;
   }
 
-  if (pthread_cond_init(&pool->condition, nullptr) != 0) {
+  if (pthread_cond_init(&pool->condition, NULL) != 0) {
     pthread_mutex_destroy(&pool->mutex);
     free(pool->threads);
     return -1;
@@ -88,30 +101,30 @@ static auto init_thread_pool(thread_pool_t *pool, int max_threads) -> int {
 }
 
 // Cleanup thread pool
-static auto cleanup_thread_pool(thread_pool_t *pool) -> void {
+static void cleanup_thread_pool(thread_pool_t *pool) {
   if (pool->threads) {
     free(pool->threads);
-    pool->threads = nullptr;
+    pool->threads = NULL;
   }
   pthread_mutex_destroy(&pool->mutex);
   pthread_cond_destroy(&pool->condition);
 }
 
 // Enhanced ping worker with better error handling
-static auto ping_worker(void *arg) -> void * {
+static void *ping_worker(void *arg) {
   ping_task_t *task = (ping_task_t *)arg;
   char cmd[CMD_LEN];
 
   atomic_fetch_add(&active_ping_threads, 1);
 
-  // C23: More efficient sprintf with compile-time checking
+  // More efficient sprintf with compile-time checking
   int ret = snprintf(cmd, sizeof(cmd), "ping -c 1 -W 1 %s > /dev/null 2>&1",
                      task->ip);
   if (ret < 0 || ret >= (int)sizeof(cmd)) {
     atomic_store(&task->alive, 0);
     atomic_store(&task->processed, 1);
     atomic_fetch_sub(&active_ping_threads, 1);
-    return nullptr;
+    return NULL;
   }
 
   ret = system(cmd);
@@ -119,17 +132,17 @@ static auto ping_worker(void *arg) -> void * {
   atomic_store(&task->processed, 1);
   atomic_fetch_sub(&active_ping_threads, 1);
 
-  return nullptr;
+  return NULL;
 }
 
 // Parallel subnet scanner worker
-static auto subnet_worker(void *arg) -> void * {
+static void *subnet_worker(void *arg) {
   subnet_task_t *subnet_task = (subnet_task_t *)arg;
 
   printf("[Thread %d] Scanning %s.%d-%d...\n", subnet_task->thread_id,
          subnet_task->subnet, subnet_task->start_host, subnet_task->end_host);
 
-  auto total = subnet_task->end_host - subnet_task->start_host + 1;
+  int total = subnet_task->end_host - subnet_task->start_host + 1;
 
   // Use dynamic thread count based on system capabilities
   int ping_threads = get_optimal_thread_count();
@@ -141,8 +154,8 @@ static auto subnet_worker(void *arg) -> void * {
   if (!tasks) {
     fprintf(stderr, "[Thread %d] Memory allocation failed\n",
             subnet_task->thread_id);
-    subnet_task->responders = 0;
-    return nullptr;
+    *(subnet_task->responders) = 0;
+    return NULL;
   }
 
   pthread_t *threads = malloc(ping_threads * sizeof(pthread_t));
@@ -150,17 +163,16 @@ static auto subnet_worker(void *arg) -> void * {
     fprintf(stderr, "[Thread %d] Thread allocation failed\n",
             subnet_task->thread_id);
     free(tasks);
-    subnet_task->responders = 0;
-    return nullptr;
+    *(subnet_task->responders) = 0;
+    return NULL;
   }
 
   int responders = 0;
-  typeof(subnet_task->start_host) idx = 0;
+  int idx = 0;
 
   // Parallel ping execution with dynamic batching
-  for (typeof(subnet_task->start_host) i = subnet_task->start_host;
-       i <= subnet_task->end_host;) {
-    typeof(ping_threads) batch = 0;
+  for (int i = subnet_task->start_host; i <= subnet_task->end_host;) {
+    int batch = 0;
 
     // Fill batch with optimal thread count
     for (; batch < ping_threads && i <= subnet_task->end_host;
@@ -174,7 +186,7 @@ static auto subnet_worker(void *arg) -> void * {
       atomic_store(&tasks[idx].alive, 0);
       atomic_store(&tasks[idx].processed, 0);
 
-      if (pthread_create(&threads[batch], nullptr, ping_worker, &tasks[idx]) !=
+      if (pthread_create(&threads[batch], NULL, ping_worker, &tasks[idx]) !=
           0) {
         fprintf(stderr, "[Thread %d] Ping thread creation failed for %s\n",
                 subnet_task->thread_id, tasks[idx].ip);
@@ -183,9 +195,9 @@ static auto subnet_worker(void *arg) -> void * {
       }
     }
 
-    // Wait for batch completion with timeout
-    for (typeof(batch) j = 0; j < batch; ++j) {
-      pthread_join(threads[j], nullptr);
+    // Wait for batch completion
+    for (int j = 0; j < batch; ++j) {
+      pthread_join(threads[j], NULL);
     }
 
     // Progress indicator for long-running subnet scans
@@ -196,7 +208,7 @@ static auto subnet_worker(void *arg) -> void * {
   }
 
   // Collect results
-  for (typeof(total) i = 0; i < total; ++i) {
+  for (int i = 0; i < total; ++i) {
     if (atomic_load(&tasks[i].alive)) {
       printf("[Thread %d] ✓ Host alive: %s\n", subnet_task->thread_id,
              tasks[i].ip);
@@ -217,16 +229,16 @@ static auto subnet_worker(void *arg) -> void * {
   atomic_fetch_add(&total_responders, responders);
   atomic_fetch_add(&subnets_scanned, 1);
 
-  subnet_task->responders = responders;
+  *(subnet_task->responders) = responders;
 
   free(tasks);
   free(threads);
-  return nullptr;
+  return NULL;
 }
 
 // Enhanced parallel subnet scanning
-static auto scan_subnets_parallel(const char *const *subnets, int count,
-                                  const char *description) -> void {
+static void scan_subnets_parallel(const char *const *subnets, int count,
+                                  const char *description) {
   printf("=== %s (Parallel Mode) ===\n", description);
   printf("Scanning %d subnets with up to %d parallel threads...\n\n", count,
          MAX_SUBNET_THREADS);
@@ -236,11 +248,13 @@ static auto scan_subnets_parallel(const char *const *subnets, int count,
 
   pthread_t *threads = malloc(subnet_threads * sizeof(pthread_t));
   subnet_task_t *tasks = malloc(count * sizeof(subnet_task_t));
+  int *responders_array = malloc(count * sizeof(int));
 
-  if (!threads || !tasks) {
+  if (!threads || !tasks || !responders_array) {
     fprintf(stderr, "Failed to allocate memory for parallel scanning\n");
     free(threads);
     free(tasks);
+    free(responders_array);
     return;
   }
 
@@ -254,10 +268,10 @@ static auto scan_subnets_parallel(const char *const *subnets, int count,
       tasks[i].subnet = subnets[i];
       tasks[i].start_host = 1;
       tasks[i].end_host = 254;
-      tasks[i].responders = 0;
+      tasks[i].responders = &responders_array[i];
       tasks[i].thread_id = j + 1;
 
-      if (pthread_create(&threads[j], nullptr, subnet_worker, &tasks[i]) != 0) {
+      if (pthread_create(&threads[j], NULL, subnet_worker, &tasks[i]) != 0) {
         fprintf(stderr, "Failed to create thread for subnet %s\n", subnets[i]);
         continue;
       }
@@ -265,7 +279,7 @@ static auto scan_subnets_parallel(const char *const *subnets, int count,
 
     // Wait for current batch to complete
     for (int j = 0; j < batch_size; ++j) {
-      pthread_join(threads[j], nullptr);
+      pthread_join(threads[j], NULL);
     }
 
     printf("Batch complete: %d/%d subnets processed\n\n", i, count);
@@ -273,12 +287,13 @@ static auto scan_subnets_parallel(const char *const *subnets, int count,
 
   free(threads);
   free(tasks);
+  free(responders_array);
 }
 
-// C23: Generic macro for parallel subnet scanning
+// Generic macro for parallel subnet scanning
 #define SCAN_SUBNET_ARRAY_PARALLEL(subnets, name)                              \
   do {                                                                         \
-    constexpr auto count = sizeof(subnets) / sizeof(subnets[0]);               \
+    const int count = sizeof(subnets) / sizeof(subnets[0]);                    \
     scan_subnets_parallel(subnets, count, name);                               \
   } while (0)
 
@@ -298,8 +313,8 @@ static const char *const common_class_a_subnets[] = {
     "10.1.2",  "10.1.10",  "10.2.0",   "10.2.1",  "10.10.0", "10.10.1",
     "10.20.0", "10.100.0", "10.200.0", "10.254.0"};
 
-static auto scan_all_common_private_networks_parallel() -> void {
-  auto start_time = time(nullptr);
+static void scan_all_common_private_networks_parallel(void) {
+  time_t start_time = time(NULL);
 
   printf(
       "Starting PARALLEL comprehensive scan of common private networks...\n");
@@ -326,13 +341,13 @@ static auto scan_all_common_private_networks_parallel() -> void {
   const char *const localhost[] = {"127.0.0"};
   scan_subnets_parallel(localhost, 1, "Localhost Network");
 
-  auto end_time = time(nullptr);
-  auto elapsed = difftime(end_time, start_time);
+  time_t end_time = time(NULL);
+  double elapsed = difftime(end_time, start_time);
 
   // Load final atomic values
-  auto final_subnets = atomic_load(&subnets_scanned);
-  auto final_hosts = atomic_load(&total_hosts_scanned);
-  auto final_responders = atomic_load(&total_responders);
+  int final_subnets = atomic_load(&subnets_scanned);
+  int final_hosts = atomic_load(&total_hosts_scanned);
+  int final_responders = atomic_load(&total_responders);
 
   printf("========================================\n");
   printf("        PARALLEL SCAN COMPLETE\n");
@@ -351,7 +366,7 @@ static auto scan_all_common_private_networks_parallel() -> void {
 }
 
 // Ultra-parallel full Class C range scanner
-static auto scan_full_class_c_range_parallel() -> void {
+static void scan_full_class_c_range_parallel(void) {
   printf("=== Ultra-Parallel Full 192.168.x.x Range Scan ===\n\n");
   printf("This will scan ALL 192.168.x.x networks (256 subnets) in parallel\n");
   printf("Using maximum parallelization...\n\n");
@@ -388,18 +403,19 @@ static auto scan_full_class_c_range_parallel() -> void {
 }
 
 // Single subnet scan (original functionality, now with better threading)
-static auto scan_single_subnet_parallel(const char *base, int start_host,
-                                        int end_host) -> void {
+static void scan_single_subnet_parallel(const char *base, int start_host,
+                                        int end_host) {
+  int responders = 0;
   subnet_task_t task = {.subnet = base,
                         .start_host = start_host,
                         .end_host = end_host,
-                        .responders = 0,
+                        .responders = &responders,
                         .thread_id = 1};
 
   subnet_worker(&task);
 }
 
-auto main() -> int {
+int main(void) {
   printf("Multi-Threaded Private Network Scanner (C23 Optimized)\n");
   printf("=====================================================\n");
   printf("System: %d CPU cores detected\n", get_nprocs());
